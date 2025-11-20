@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Three.js Modular Shooter</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+    <!-- Health Bar UI -->
+    <div id="health-container">
+        <div id="health-bar"></div>
+        <div id="health-text">100%</div>
+    </div>
+
+    <!-- Hit Effect & HUD -->
+    <div id="hit-overlay"></div>
+    <div id="crosshair"></div>
+    <div id="status">STATUS: HIDDEN</div>
+
+    <!-- Menu / Game Over Screen -->
+    <div id="blocker">
+        <div id="loading-text">Loading Assets...</div>
+        
+        <div id="instructions">
+            CLICK TO PLAY
+            <div id="sub-text">
+                WASD = Move | SPACE = Jump | TAB = Crouch<br/>
+                LEFT CLICK = Shoot
+                <br><br>
+                <span style="color: #ffffaa">Don't shoot unless you want a war!</span>
+            </div>
+        </div>
+
+        <div id="game-over">
+            GAME OVER
+            <div id="sub-text">Click to Restart</div>
+        </div>
+    </div>
+
+    <!-- Import Map -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module" src="js/game.js"></script>
+
+</body>
+</html>
