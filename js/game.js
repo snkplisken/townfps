@@ -12,36 +12,39 @@ let isPaused = true;
 let isGameOver = false;
 let playerHealth = SETTINGS.PLAYER_MAX_HEALTH;
 
-// Assets & Animation
+// -- Route & Debug Systems --
+const parsedRoutes = {}; // Stores "Route_Enemy1": [{x,z}, {x,z}...]
+let isDebugMode = false;
+const debugGroup = new THREE.Group(); // Container for debug lines
+
+// -- Assets & Entities --
 const loadedModels = { world: null, enemies: [], npcs: [], weapon: null, hands: null };
 const mixers = [];
-
-// Entities
 const worldColliders = [];
 let mobs = []; 
 let bullets = [];
 let particles = [];
 
-// Player Rig
+// -- Player Rig --
 let weaponGroup = null;
 let isRecoil = false;
 const weaponOffset = new THREE.Vector3(0.4, -0.5, -0.5); 
 const recoilPos = new THREE.Vector3(0.4, -0.4, -0.4);
 
-// Physics State
+// -- Physics State --
 let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
 let canJump = false, isCrouching = false;
 const velocity = new THREE.Vector3();
 let prevTime = performance.now();
 
-// Raycasters (Optimized)
+// -- Raycasters --
 const downRay = new THREE.Raycaster();
 const wallRay = new THREE.Raycaster(); 
 const bulletRay = new THREE.Raycaster();
 
-// OPTIMIZATION: Limit ray distance so we don't calculate walls across the map
+// Optimization
 wallRay.far = 5; 
-downRay.far = 20; // Increased slightly to account for the safety buffer
+downRay.far = 20; 
 
 init();
 
@@ -55,7 +58,7 @@ function init() {
     camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
     camera.position.y = 10; 
 
-    // 3. Renderer (Optimized)
+    // 3. Renderer
     renderer = new THREE.WebGLRenderer({ 
         antialias: true, 
         powerPreference: "high-performance", 
@@ -63,24 +66,22 @@ function init() {
     });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); 
     renderer.setSize(window.innerWidth, window.innerHeight);
-    
     renderer.outputColorSpace = THREE.SRGBColorSpace; 
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap; 
     document.body.appendChild(renderer.domElement);
 
-    // 4. Controls
+    // 4. Controls & Loader
     controls = new PointerLockControls(camera, document.body);
     gltfLoader = new GLTFLoader();
 
-    // 5. Lights 
+    // 5. Lighting
     const light = new THREE.HemisphereLight(0xffffff, 0x444444, 1.0);
     scene.add(light);
     
     const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
     dirLight.position.set(50, 80, 50);
     dirLight.castShadow = true;
-    
     dirLight.shadow.mapSize.width = 2048; 
     dirLight.shadow.mapSize.height = 2048;
     dirLight.shadow.bias = -0.0005;      
@@ -93,12 +94,13 @@ function init() {
 
     setupInputs();
 
-    // 6. Load Assets
+    // 6. Load & Start
     loadAllAssets(() => {
         setupWorld();
         createPlayerRig();
         startLevel();
         
+        // Hide loading screen
         const loadText = document.getElementById('loading-text');
         const instr = document.getElementById('instructions');
         if(loadText) loadText.style.display = 'none';
@@ -119,6 +121,7 @@ function startLevel() {
     updateHealthUI();
     isGameOver = false;
     isAggro = false;
+    
     const statusEl = document.getElementById('status');
     if(statusEl) {
         statusEl.innerText = "STATUS: HIDDEN";
@@ -140,7 +143,6 @@ function loadAllAssets(onComplete) {
         if(!path) return;
         loader.load(path, (gltf) => {
             const model = gltf.scene;
-            
             model.traverse(c => { 
                 if(c.isMesh) { 
                     c.castShadow = true; 
@@ -148,7 +150,6 @@ function loadAllAssets(onComplete) {
                     if(c.material.map) c.material.map.anisotropy = renderer.capabilities.getMaxAnisotropy();
                 } 
             });
-
             if(gltf.animations.length > 0) model.userData.rawClips = gltf.animations;
             
             if(isSingle) {
@@ -180,15 +181,82 @@ function setupMixer(mesh, rawClips) {
     return mixer;
 }
 
-// --- WORLD & SPAWNING ---
+// --- ROUTE SYSTEM ---
+function extractRoutesFromWorld(worldScene) {
+    worldScene.traverse((obj) => {
+        // Find meshes starting with "Route_"
+        if (obj.isMesh && obj.name.startsWith("Route_")) {
+            const points = [];
+            const posAttribute = obj.geometry.attributes.position;
+            
+            // Convert mesh vertices to path points
+            for (let i = 0; i < posAttribute.count; i++) {
+                const localVec = new THREE.Vector3();
+                localVec.fromBufferAttribute(posAttribute, i);
+                
+                // IMPORTANT: Convert to world space
+                obj.localToWorld(localVec);
+                
+                points.push({ x: localVec.x, z: localVec.z });
+            }
+
+            parsedRoutes[obj.name] = points;
+            console.log(`✅ Path Loaded: ${obj.name} (${points.length} pts)`);
+
+            // Hide mesh and mark it so it's not a wall
+            obj.visible = false; 
+            obj.userData.isRoute = true;
+        }
+    });
+}
+
+function toggleDebugMode() {
+    isDebugMode = !isDebugMode;
+    
+    if (isDebugMode) {
+        scene.add(debugGroup);
+        debugGroup.clear();
+        console.log("🐞 DEBUG MODE: ON");
+
+        // Draw lines for every route
+        for (const [name, points] of Object.entries(parsedRoutes)) {
+            if (!points || points.length === 0) continue;
+
+            const positions = [];
+            points.forEach(pt => {
+                // Draw at height 5 so we can see them above ground
+                positions.push(pt.x, 5.0, pt.z);
+            });
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+
+            // Red for Enemies, Green for NPCs
+            const isEnemyRoute = name.toLowerCase().includes('enemy');
+            const color = isEnemyRoute ? 0xff0000 : 0x00ff00;
+
+            const material = new THREE.LineBasicMaterial({ color: color, linewidth: 2 });
+            const line = new THREE.Line(geometry, material);
+            debugGroup.add(line);
+        }
+    } else {
+        scene.remove(debugGroup);
+        console.log("🐞 DEBUG MODE: OFF");
+    }
+}
+
 function setupWorld() {
     if (loadedModels.world) {
         const world = loadedModels.world;
         world.scale.setScalar(ASSETS.worldScale);
         scene.add(world);
         
+        // 1. Extract Routes
+        extractRoutesFromWorld(world);
+
+        // 2. Setup Colliders (Ignore routes)
         world.traverse((child) => {
-            if (child.isMesh) {
+            if (child.isMesh && !child.userData.isRoute) {
                 worldColliders.push(child);
                 child.material.side = THREE.DoubleSide; 
             }
@@ -205,29 +273,45 @@ function spawnCategory(count, isEnemy) {
     const boxGeo = new THREE.BoxGeometry(1, 2, 1);
     boxGeo.translate(0, 1, 0);
 
-    let attempts = 0;
-    
     for(let i=0; i<count; i++) {
-        let x, z, y;
-        let validSpot = false;
+        let x = 0, y = 0, z = 0;
+        let assignedRoute = null;
+        
+        // DYNAMIC NAME MATCHING
+        // Enemy #1 looks for "Route_Enemy1"
+        const indexSuffix = i + 1; 
+        const targetRouteName = isEnemy ? `Route_Enemy${indexSuffix}` : `Route_NPC${indexSuffix}`;
 
-        while(!validSpot && attempts < 50) {
-            x = (Math.random() - 0.5) * 80; 
-            z = (Math.random() - 0.5) * 80;
+        if (parsedRoutes[targetRouteName]) {
+            assignedRoute = parsedRoutes[targetRouteName];
             
-            // Spawn Ray also needs to be high
-            const spawnStart = new THREE.Vector3(x, 50, z);
-            downRay.set(spawnStart, new THREE.Vector3(0, -1, 0));
+            // Spawn at start of path
+            x = assignedRoute[0].x;
+            z = assignedRoute[0].z;
+            
+            // Snap to floor
+            const spawnRayStart = new THREE.Vector3(x, 50, z);
+            downRay.set(spawnRayStart, new THREE.Vector3(0, -1, 0));
             const hits = downRay.intersectObjects(worldColliders, true);
+            if(hits.length > 0) y = hits[0].point.y;
             
-            if(hits.length > 0) {
-                y = hits[0].point.y;
-                validSpot = true;
+            console.log(`Mob ${i} assigned to ${targetRouteName}`);
+        } 
+        else {
+            // Random spawn if no route found
+            let attempts = 0;
+            let validSpot = false;
+            while(!validSpot && attempts < 50) {
+                x = (Math.random() - 0.5) * 80; 
+                z = (Math.random() - 0.5) * 80;
+                downRay.set(new THREE.Vector3(x, 50, z), new THREE.Vector3(0, -1, 0));
+                const hits = downRay.intersectObjects(worldColliders, true);
+                if(hits.length > 0) { y = hits[0].point.y; validSpot = true; }
+                attempts++;
             }
-            attempts++;
         }
-        attempts = 0; 
 
+        // Create Mesh
         let mob;
         let scale = 1;
         const modelList = isEnemy ? loadedModels.enemies : loadedModels.npcs;
@@ -244,12 +328,18 @@ function spawnCategory(count, isEnemy) {
 
         mob.scale.setScalar(scale);
         mob.position.set(x, y || 0, z);
+        
         mob.userData = { 
             type: isEnemy ? 'enemy' : 'npc', 
             velocity: new THREE.Vector3(), 
             changeTime: 0, 
             shootTimer: Math.random() * 2, 
-            currentAnim: '' 
+            currentAnim: '',
+            
+            // Path Logic
+            route: assignedRoute,
+            waypointIndex: 0,
+            waitTime: 0
         };
         
         scene.add(mob);
@@ -257,6 +347,7 @@ function spawnCategory(count, isEnemy) {
     }
 }
 
+// --- PLAYER & PHYSICS ---
 function createPlayerRig() {
     weaponGroup = new THREE.Group();
     if (loadedModels.hands) {
@@ -283,61 +374,17 @@ function createPlayerRig() {
         const gunMat = new THREE.MeshStandardMaterial({ color: 0x333333 });
         const gunBody = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.15, 0.6), gunMat);
         gunBody.position.set(0.2, 0.05, -0.2);
-        const barrelMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
-        const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.6), barrelMat);
-        barrel.rotation.x = Math.PI / 2;
-        barrel.position.set(0.2, 0.1, -0.5);
         weaponGroup.add(gunBody);
-        weaponGroup.add(barrel);
     }
     weaponGroup.position.copy(weaponOffset);
     camera.add(weaponGroup);
 }
 
-function takeDamage(amount) {
-    if(isGameOver) return;
-    playerHealth -= amount;
-    if(playerHealth < 0) playerHealth = 0;
-    updateHealthUI();
-    
-    const overlay = document.getElementById('hit-overlay');
-    if(overlay) {
-        overlay.style.opacity = 0.8;
-        setTimeout(() => { overlay.style.opacity = 0; }, 200);
-    }
-    if(playerHealth <= 0) triggerGameOver();
-}
-
-function updateHealthUI() {
-    const percent = (playerHealth / SETTINGS.PLAYER_MAX_HEALTH) * 100;
-    const bar = document.getElementById('health-bar');
-    const text = document.getElementById('health-text');
-    if(bar && text) {
-        bar.style.width = percent + '%';
-        text.innerText = Math.ceil(playerHealth) + '%';
-        if(percent < 30) bar.style.backgroundColor = '#ff0000';
-        else bar.style.backgroundColor = '#00ff00';
-    }
-}
-
-function triggerGameOver() {
-    isGameOver = true;
-    controls.unlock(); 
-    const instr = document.getElementById('instructions');
-    const go = document.getElementById('game-over');
-    const blocker = document.getElementById('blocker');
-    if(instr) instr.style.display = 'none';
-    if(go) go.style.display = 'block';
-    if(blocker) blocker.style.display = 'flex';
-}
-
-// --- PHYSICS UPDATE (FIXED FOR CROUCHING) ---
 function updatePlayerPhysics(delta) {
     if(isGameOver) return;
 
     velocity.y -= SETTINGS.GRAVITY * delta;
     const speed = isCrouching ? SETTINGS.CROUCH_SPEED : SETTINGS.WALK_SPEED;
-    // Target Height logic
     const targetHeight = isCrouching ? SETTINGS.CROUCH_HEIGHT : SETTINGS.PLAYER_HEIGHT;
 
     const forward = new THREE.Vector3();
@@ -346,7 +393,6 @@ function updatePlayerPhysics(delta) {
     const right = new THREE.Vector3();
     right.crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
 
-    // Instant Velocity (Snappy)
     velocity.x = 0; velocity.z = 0;
     if (moveForward) { velocity.x += forward.x * speed; velocity.z += forward.z * speed; }
     if (moveBackward) { velocity.x -= forward.x * speed; velocity.z -= forward.z * speed; }
@@ -365,23 +411,17 @@ function updatePlayerPhysics(delta) {
         if (!checkWallCollision(dirZ, Math.abs(intendedZ))) camera.position.z += intendedZ;
     }
 
-    // --- COLLISION FIX: Lift Raycaster Origin ---
-    // We create a ray origin that is 2 units ABOVE the camera.
-    // This ensures that even if the camera clips into the ground during a crouch,
-    // the ray still hits the ground surface from above.
+    // Raycast Origin Correction for Crouching
     const rayOrigin = camera.position.clone();
     const RAY_BUFFER = 2.0; 
     rayOrigin.y += RAY_BUFFER; 
-
+    
     downRay.set(rayOrigin, new THREE.Vector3(0, -1, 0));
     const hits = downRay.intersectObjects(worldColliders, true);
 
     if (hits.length > 0) {
-        // Adjust distance because we moved the origin up
         const realDistance = hits[0].distance - RAY_BUFFER;
         const groundY = hits[0].point.y;
-        
-        // Check if we are close enough to the ground to snap to it
         if (realDistance < targetHeight + 0.5 && velocity.y <= 0) {
             camera.position.y = groundY + targetHeight;
             velocity.y = 0;
@@ -390,10 +430,9 @@ function updatePlayerPhysics(delta) {
             camera.position.y += velocity.y * delta;
         }
     } else {
-        // Fall if no ground detected
         camera.position.y += velocity.y * delta;
     }
-
+    
     if (camera.position.y < -50) { 
         velocity.y = 0; camera.position.set(0, 10, 0); takeDamage(20); 
     }
@@ -408,25 +447,28 @@ function checkWallCollision(direction, distance) {
     return false;
 }
 
-// --- LOGIC ---
+// --- GAME LOGIC ---
 function updateMobs(delta) {
     if(isGameOver) return;
     
     mobs.forEach(mob => {
         const isEnemy = mob.userData.type === 'enemy';
         let isMoving = false;
+        let moveSpeed = 3.5;
 
-        const dist = mob.position.distanceTo(camera.position);
-        if(dist > 60) return; 
+        const distToPlayer = mob.position.distanceTo(camera.position);
+        if(distToPlayer > 80) return; 
 
+        // 1. COMBAT AI (Priority)
         if (isEnemy && isAggro) {
              const lookDir = new THREE.Vector3().subVectors(camera.position, mob.position).normalize();
              lookDir.y = 0; 
              mob.lookAt(camera.position.x, mob.position.y, camera.position.z);
 
-             if (dist > 2) {
+             if (distToPlayer > 3) {
                  mob.position.add(lookDir.multiplyScalar(4.0 * delta));
                  isMoving = true;
+                 moveSpeed = 4.0;
              }
 
              mob.userData.shootTimer -= delta;
@@ -436,6 +478,30 @@ function updateMobs(delta) {
                  mob.userData.shootTimer = 1.0 + Math.random() * 2;
              }
         } 
+        // 2. PATH FOLLOWING AI (Mesh Vertices)
+        else if (mob.userData.route && mob.userData.route.length > 0) {
+            const route = mob.userData.route;
+            const idx = mob.userData.waypointIndex;
+            const targetPoint = route[idx];
+            
+            // Horizontal distance check
+            const dx = targetPoint.x - mob.position.x;
+            const dz = targetPoint.z - mob.position.z;
+            const distToWaypoint = Math.sqrt(dx*dx + dz*dz);
+
+            // Small threshold for mesh vertices
+            if (distToWaypoint < 0.5) {
+                mob.userData.waypointIndex = (idx + 1) % route.length; 
+            } else {
+                const moveDir = new THREE.Vector3(dx, 0, dz).normalize();
+                mob.position.add(moveDir.multiplyScalar(moveSpeed * delta));
+                
+                const lookTarget = new THREE.Vector3(targetPoint.x, mob.position.y, targetPoint.z);
+                mob.lookAt(lookTarget);
+                isMoving = true;
+            }
+        }
+        // 3. IDLE WANDER (Fallback)
         else {
             mob.userData.changeTime -= delta;
             if(mob.userData.changeTime <= 0) {
@@ -450,6 +516,7 @@ function updateMobs(delta) {
             isMoving = true;
         }
         
+        // Gravity / Ground Snap
         const rayOrigin = mob.position.clone();
         rayOrigin.y += 1.0;
         downRay.set(rayOrigin, new THREE.Vector3(0, -1, 0));
@@ -457,6 +524,7 @@ function updateMobs(delta) {
         if(hits.length > 0) mob.position.y = hits[0].point.y; 
         else mob.position.y -= 9.8 * delta; 
 
+        // Animations
         if(mob.userData.actions) {
             if(isMoving) {
                 if(isEnemy && isAggro) playAnimationFuzzy(mob, 'Run') || playAnimationFuzzy(mob, 'Walk');
@@ -539,6 +607,53 @@ function shootBullet(sourceObj, isPlayer) {
     bullets.push(bullet);
 }
 
+function takeDamage(amount) {
+    if(isGameOver) return;
+    playerHealth -= amount;
+    if(playerHealth < 0) playerHealth = 0;
+    updateHealthUI();
+    
+    const overlay = document.getElementById('hit-overlay');
+    if(overlay) {
+        overlay.style.opacity = 0.8;
+        setTimeout(() => { overlay.style.opacity = 0; }, 200);
+    }
+    if(playerHealth <= 0) triggerGameOver();
+}
+
+function updateHealthUI() {
+    const percent = (playerHealth / SETTINGS.PLAYER_MAX_HEALTH) * 100;
+    const bar = document.getElementById('health-bar');
+    const text = document.getElementById('health-text');
+    if(bar && text) {
+        bar.style.width = percent + '%';
+        text.innerText = Math.ceil(playerHealth) + '%';
+        bar.style.backgroundColor = percent < 30 ? '#ff0000' : '#00ff00';
+    }
+}
+
+function triggerGameOver() {
+    isGameOver = true;
+    controls.unlock(); 
+    const instr = document.getElementById('instructions');
+    const go = document.getElementById('game-over');
+    const blocker = document.getElementById('blocker');
+    if(instr) instr.style.display = 'none';
+    if(go) go.style.display = 'block';
+    if(blocker) blocker.style.display = 'flex';
+}
+
+function triggerAggro() {
+    if(!isAggro) {
+        isAggro = true;
+        const statusEl = document.getElementById('status');
+        if(statusEl) {
+            statusEl.innerText = "STATUS: UNDER ATTACK!";
+            statusEl.style.color = "red";
+        }
+    }
+}
+
 function animate() {
     requestAnimationFrame(animate);
     if (isPaused) return; 
@@ -571,17 +686,6 @@ function animate() {
     }
 
     renderer.render(scene, camera);
-}
-
-function triggerAggro() {
-    if(!isAggro) {
-        isAggro = true;
-        const statusEl = document.getElementById('status');
-        if(statusEl) {
-            statusEl.innerText = "STATUS: UNDER ATTACK!";
-            statusEl.style.color = "red";
-        }
-    }
 }
 
 function onMouseClick(event) {
@@ -674,6 +778,9 @@ function setupInputs() {
             case 'KeyD': moveRight = true; break;
             case 'Space': if (canJump) { velocity.y += SETTINGS.JUMP_FORCE; canJump = false; } break;
             case 'Tab': e.preventDefault(); isCrouching = true; break;
+            
+            // --- DEBUG MODE ---
+            case 'KeyP': toggleDebugMode(); break;
         }
     });
     document.addEventListener('keyup', (e) => {
